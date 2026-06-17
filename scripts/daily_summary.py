@@ -158,42 +158,25 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 - Группируй резюме по темам форума из входных данных. Каждая тема — отдельный блок с заголовком <b>Название темы</b> (без topic_id).
 - Пропускай темы без значимых обсуждений за сутки.
 - Внутри темы: тезисы через «• <b>Краткий заголовок</b>: описание»; подпункты через «- ».
+- После важного тезиса добавляй ссылку на источник маркером [[msg:ID]] (1–3 ID на тезис). Используй только ID из входных [msg:ID]. Не выдумывай ID.
+- Если есть полезные рекомендации — общий блок «Советы:» со списком «- » (можно со ссылками [[msg:ID]]).
 - В конце: Игнорируем: флуд, мемы, мелкий оффтоп.
-- Только теги <b> и <i>. Без <ul>, <ol>, <li>, <p>, <br>, без Markdown (** или __).
+- Только теги <b> и <i>. Без <ul>, <ol>, <li>, <p>, <br>, <a>, без Markdown (** или __).
 - Только переносы строк между блоками.
 
-Ссылки на сообщения (критично для кликабельности в Telegram):
-- Для каждого важного тезиса указывай источник маркером [[msg:ID]] (1–3 ID на тезис).
-- Используй только ID из входных [msg:ID]. Не выдумывай ID.
-- Маркер ставь в конце тезиса: «…описание. [[msg:123]]». Несколько источников: «[[msg:1]] [[msg:2]]».
-- НЕ ставь эмодзи ↗, ➚, 🔗 и не пиши URL (https://t.me/...) вручную — они не станут ссылками.
-- НЕ используй тег <a href="..."> — ссылки добавляются автоматически: [[msg:123]] превратится в кликабельный ↗.
-- Не путай форматы: в тексте ответа только [[msg:ID]] (двойные скобки), не [msg:ID].
-
-Разметка Telegram HTML:
-- parse_mode=HTML: жирный — <b>текст</b>, курсив — <i>текст</i>.
-- Ссылки <a href="URL">↗</a> добавляются скриптом из [[msg:ID]]; в ответе их не пиши.
-- Спецсимволы <, >, & в обычном тексте не нужны — пиши обычный русский текст.
-- Если есть полезные рекомендации — общий блок «Советы:» со списком «- » (со ссылками [[msg:ID]]).
-
-Пример (в ответе — только маркеры, без ↗ и без <a>):
+Пример:
 <b>{SUMMARY_HEADER}</b>
 
 <b>{DEFAULT_GENERAL_TOPIC_TITLE}</b>
 • <b>Поиск людей</b>: Сложность из-за законов о данных. [[msg:123]]
 
 <b>Библиотека/Ссылки</b>
-• <b>Новые материалы</b>: Опубликовали подборку по архивам. [[msg:456]] [[msg:457]]
+• <b>Новые материалы</b>: Опубликовали подборку по архивам. [[msg:456]]
 
 Советы:
 - Проверяйте правила отделения почты. [[msg:789]]
 
 Игнорируем: флуд, мемы, мелкий оффтоп.
-
-Неправильно (так НЕ делай):
-• <b>Тезис</b>: Описание. ↗
-• <b>Тезис</b>: Описание. <a href="https://t.me/...">↗</a>
-• <b>Тезис</b>: Описание. [msg:123]
 
 Сообщения:
 {messages_text}
@@ -232,28 +215,16 @@ def strip_html_tags(text: str) -> str:
     return html.unescape(plain)
 
 
-MSG_LINK_MARKER_RE = re.compile(
-    r"\[\[msg:(\d+)\]\]"  # preferred [[msg:ID]]
-    r"|\[msg:(\d+)\]"  # common model mistake [msg:ID]
-)
-ORPHAN_LINK_EMOJI_RE = re.compile(r"[↗️➚🔗]\s*")
-
-
-def strip_orphan_link_emojis(text: str) -> str:
-    """Remove ↗ emojis the model adds instead of [[msg:ID]] markers."""
-    return ORPHAN_LINK_EMOJI_RE.sub("", text)
-
-
 def inject_message_links(text: str, message_links: dict[int, str]) -> str:
     def replace_marker(match: re.Match[str]) -> str:
-        message_id = int(match.group(1) or match.group(2))
+        message_id = int(match.group(1))
         url = message_links.get(message_id)
         if not url:
             return ""
         escaped_url = html.escape(url, quote=True)
         return f'<a href="{escaped_url}">↗</a>'
 
-    return MSG_LINK_MARKER_RE.sub(replace_marker, text)
+    return re.sub(r"\[\[msg:(\d+)\]\]", replace_marker, text)
 
 
 def summarize_with_openrouter(
@@ -271,7 +242,6 @@ def summarize_with_openrouter(
         raise RuntimeError(f"Unexpected OpenRouter response: {payload}") from exc
 
     summary = normalize_telegram_html(summary)
-    summary = strip_orphan_link_emojis(summary)
     summary = inject_message_links(summary, message_links)
 
     if len(summary) > MAX_TELEGRAM_MESSAGE_LENGTH:
