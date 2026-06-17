@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-import os
 import re
 import sys
 import time
@@ -29,10 +28,10 @@ from telegram_common import (
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 MAX_SUMMARY_LENGTH = 3800
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
-DEFAULT_OPENROUTER_FALLBACK_MODEL = "openrouter/free"
+OPENROUTER_MODEL = "openrouter/free"
 MAX_OPENROUTER_RETRIES = 5
 OPENROUTER_RETRYABLE_STATUS_CODES = {429, 503}
+TELEGRAM_ALLOWED_HTML_TAGS = frozenset({"b", "i", "a", "strong", "em"})
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
 
@@ -79,25 +78,6 @@ def build_messages_text(
         sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
-
-
-def get_openrouter_model() -> str:
-    return os.environ.get("OPENROUTER_MODEL", "").strip() or DEFAULT_OPENROUTER_MODEL
-
-
-def get_openrouter_fallback_model() -> str:
-    return (
-        os.environ.get("OPENROUTER_FALLBACK_MODEL", "").strip()
-        or DEFAULT_OPENROUTER_FALLBACK_MODEL
-    )
-
-
-def get_openrouter_models() -> list[str]:
-    models = [get_openrouter_model()]
-    fallback = get_openrouter_fallback_model()
-    if fallback and fallback not in models:
-        models.append(fallback)
-    return models
 
 
 def parse_retry_after_seconds(response: httpx.Response) -> float:
@@ -210,7 +190,29 @@ def normalize_telegram_html(text: str) -> str:
     normalized = re.sub(r"__(.+?)__", r"<b>\1</b>", normalized)
     normalized = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", normalized)
     normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
-    return normalized
+    return sanitize_telegram_html(normalized)
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """Keep only Telegram-supported tags and fix common entity issues."""
+    allowed = "|".join(sorted(TELEGRAM_ALLOWED_HTML_TAGS))
+    sanitized = re.sub(
+        rf"</?(?!{allowed}\b)[^>]+>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(r"<strong>", "<b>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</strong>", "</b>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"<em>", "<i>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</em>", "</i>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", sanitized)
+    return sanitized
+
+
+def strip_html_tags(text: str) -> str:
+    plain = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(plain)
 
 
 def inject_message_links(text: str, message_links: dict[int, str]) -> str:
@@ -232,23 +234,7 @@ def summarize_with_openrouter(
 ) -> str:
     api_key = require_env("OPENROUTER_API_KEY")
     prompt = build_summary_prompt(messages_text, period_label)
-    models = get_openrouter_models()
-    payload: dict | None = None
-
-    for index, model in enumerate(models):
-        if index > 0:
-            print(f"Trying fallback OpenRouter model: {model}...")
-        try:
-            payload = request_openrouter_completion(api_key, model, prompt)
-            break
-        except RuntimeError as exc:
-            if index < len(models) - 1:
-                print(f"Model {model} failed: {exc}")
-                continue
-            raise
-
-    if payload is None:
-        raise RuntimeError("OpenRouter request failed without a response payload")
+    payload = request_openrouter_completion(api_key, OPENROUTER_MODEL, prompt)
 
     try:
         summary = payload["choices"][0]["message"]["content"].strip()
@@ -288,22 +274,36 @@ def build_empty_summary() -> str:
 def send_to_channel(text: str) -> None:
     bot_token = require_env("TELEGRAM_BOT_TOKEN")
     channel = require_env("TELEGRAM_CHANNEL")
+    send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    response = httpx.post(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        json={
+    attempts: list[tuple[str, str | None]] = [
+        (sanitize_telegram_html(text), "HTML"),
+        (strip_html_tags(text), None),
+    ]
+
+    last_error = "unknown error"
+    for index, (message_text, parse_mode) in enumerate(attempts):
+        if index > 0:
+            print("Telegram rejected HTML formatting, retrying as plain text...")
+
+        payload: dict[str, object] = {
             "chat_id": channel,
-            "text": text,
-            "parse_mode": "HTML",
+            "text": message_text,
             "disable_web_page_preview": True,
-        },
-        timeout=60.0,
-    )
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
-    if not response.is_success:
-        raise RuntimeError(
-            f"Failed to send message to channel: {response.status_code} {response.text}"
-        )
+        response = httpx.post(send_url, json=payload, timeout=60.0)
+        if response.is_success:
+            return
+
+        last_error = f"{response.status_code} {response.text.strip()}"
+        description = response.text.lower()
+        if index == 0 and "can't parse entities" not in description:
+            break
+
+    raise RuntimeError(f"Failed to send message to channel: {last_error}")
 
 
 def build_summary(
@@ -324,9 +324,7 @@ def build_summary(
         fetch_result.username,
         fetch_result.chat_id,
     )
-    models = get_openrouter_models()
-    model_label = ", ".join(models)
-    print(f"Generating summary with OpenRouter ({model_label})...")
+    print(f"Generating summary with OpenRouter ({OPENROUTER_MODEL})...")
     summary = summarize_with_openrouter(messages_text, period_label, message_links)
     return ensure_summary_header(summary)
 

@@ -20,7 +20,6 @@
 | `TELEGRAM_BOT_TOKEN` | Токен бота от [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHANNEL` | Канал назначения: `@channel` или `-100...` |
 | `OPENROUTER_API_KEY` | API-ключ [OpenRouter](https://openrouter.ai/keys) |
-| `OPENROUTER_MODEL` | Модель (по умолчанию `meta-llama/llama-3.3-70b-instruct:free`) |
 | `TIMEZONE` | Часовой пояс для границ «суток» (по умолчанию `Europe/Minsk`) |
 
 Скопируйте `.env.example` в `.env` для локального запуска.
@@ -50,7 +49,7 @@ python scripts/create_session.py
 2. Создайте ключ на [openrouter.ai/keys](https://openrouter.ai/keys).
 3. Укажите `OPENROUTER_API_KEY` в `.env` и GitHub Secrets.
 
-По умолчанию используется бесплатная модель `meta-llama/llama-3.3-70b-instruct:free`. Список бесплатных моделей: [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0). Чтобы сменить модель, задайте `OPENROUTER_MODEL` (в GitHub — **Variables**).
+Модель зашита в коде: `openrouter/free` (бесплатный роутер OpenRouter). Список бесплатных моделей: [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0).
 
 ### 4. GitHub Secrets
 
@@ -58,7 +57,7 @@ python scripts/create_session.py
 
 Добавьте все переменные из таблицы выше.
 
-Опционально в **Variables** добавьте `TIMEZONE` и `OPENROUTER_MODEL`.
+Опционально в **Variables** добавьте `TIMEZONE`.
 
 ## Локальный запуск
 
