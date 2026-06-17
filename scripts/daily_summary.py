@@ -106,7 +106,7 @@ def request_openrouter_completion(api_key: str, model: str, prompt: str) -> dict
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/uezdy/uezdy.github.io",
+                "HTTP-Referer": "https://github.com/uezdy/daily-telegram-summary",
                 "X-Title": "Daily Telegram Summary",
             },
             json={
