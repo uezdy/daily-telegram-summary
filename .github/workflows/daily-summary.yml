@@ -2,8 +2,8 @@ name: Daily Telegram Summary
 
 on:
   schedule:
-    # Every day  at 06:00 UTC (09:00 Europe/Minsk)
-    - cron: '0 6 * * *'
+    # Every day at 06:15 UTC (09:15 Europe/Minsk) — offset from :00 to avoid peak load
+    - cron: '15 6 * * *'
   workflow_dispatch:
 
 jobs:
