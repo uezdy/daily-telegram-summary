@@ -30,6 +30,7 @@ MAX_SUMMARY_LENGTH = 3800
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = "openrouter/free"
 MAX_OPENROUTER_RETRIES = 5
+MAX_OPENROUTER_EMPTY_CONTENT_RETRIES = 3
 OPENROUTER_RETRYABLE_STATUS_CODES = {429, 503}
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
@@ -140,6 +141,40 @@ def request_openrouter_completion(api_key: str, model: str, prompt: str) -> dict
     raise RuntimeError(f"OpenRouter request failed after {MAX_OPENROUTER_RETRIES} retries")
 
 
+def extract_openrouter_content(payload: dict) -> str:
+    try:
+        choice = payload["choices"][0]
+        message = choice["message"]
+        content = message.get("content")
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"Unexpected OpenRouter response: {payload}") from exc
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if text:
+                    parts.append(text)
+        content = "\n".join(parts)
+
+    if not isinstance(content, str):
+        finish_reason = choice.get("finish_reason")
+        error = choice.get("error")
+        raise RuntimeError(
+            "OpenRouter returned empty content "
+            f"(finish_reason={finish_reason!r}, error={error!r})"
+        )
+
+    summary = content.strip()
+    if not summary:
+        finish_reason = choice.get("finish_reason")
+        raise RuntimeError(
+            f"OpenRouter returned blank content (finish_reason={finish_reason!r})"
+        )
+    return summary
+
+
 def build_summary_prompt(messages_text: str, period_label: str) -> str:
     return f"""Ты помощник для телеграм-сообщества. Проанализируй сообщения из группы за сутки ({period_label}).
 
@@ -211,12 +246,21 @@ def summarize_with_openrouter(
 ) -> str:
     api_key = require_env("OPENROUTER_API_KEY")
     prompt = build_summary_prompt(messages_text, period_label)
-    payload = request_openrouter_completion(api_key, OPENROUTER_MODEL, prompt)
 
-    try:
-        summary = payload["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError) as exc:
-        raise RuntimeError(f"Unexpected OpenRouter response: {payload}") from exc
+    summary = ""
+    for attempt in range(1, MAX_OPENROUTER_EMPTY_CONTENT_RETRIES + 1):
+        payload = request_openrouter_completion(api_key, OPENROUTER_MODEL, prompt)
+        try:
+            summary = extract_openrouter_content(payload)
+            break
+        except RuntimeError as exc:
+            if attempt >= MAX_OPENROUTER_EMPTY_CONTENT_RETRIES:
+                raise
+            print(
+                f"{exc}, retrying "
+                f"({attempt}/{MAX_OPENROUTER_EMPTY_CONTENT_RETRIES})..."
+            )
+            time.sleep(2.0)
 
     summary = normalize_telegram_html(summary)
     summary = inject_message_links(summary, message_links)
