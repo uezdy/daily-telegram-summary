@@ -31,7 +31,6 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = "openrouter/free"
 MAX_OPENROUTER_RETRIES = 5
 OPENROUTER_RETRYABLE_STATUS_CODES = {429, 503}
-TELEGRAM_ALLOWED_HTML_TAGS = frozenset({"b", "i", "a", "strong", "em"})
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
 
@@ -190,29 +189,7 @@ def normalize_telegram_html(text: str) -> str:
     normalized = re.sub(r"__(.+?)__", r"<b>\1</b>", normalized)
     normalized = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", normalized)
     normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
-    return sanitize_telegram_html(normalized)
-
-
-def sanitize_telegram_html(text: str) -> str:
-    """Keep only Telegram-supported tags and fix common entity issues."""
-    allowed = "|".join(sorted(TELEGRAM_ALLOWED_HTML_TAGS))
-    sanitized = re.sub(
-        rf"</?(?!{allowed}\b)[^>]+>",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    sanitized = re.sub(r"<strong>", "<b>", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"</strong>", "</b>", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"<em>", "<i>", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"</em>", "</i>", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", sanitized)
-    return sanitized
-
-
-def strip_html_tags(text: str) -> str:
-    plain = re.sub(r"<[^>]+>", "", text)
-    return html.unescape(plain)
+    return normalized
 
 
 def inject_message_links(text: str, message_links: dict[int, str]) -> str:
@@ -276,34 +253,19 @@ def send_to_channel(text: str) -> None:
     channel = require_env("TELEGRAM_CHANNEL")
     send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    attempts: list[tuple[str, str | None]] = [
-        (sanitize_telegram_html(text), "HTML"),
-        (strip_html_tags(text), None),
-    ]
+    payload: dict[str, object] = {
+        "chat_id": channel,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
 
-    last_error = "unknown error"
-    for index, (message_text, parse_mode) in enumerate(attempts):
-        if index > 0:
-            print("Telegram rejected HTML formatting, retrying as plain text...")
-
-        payload: dict[str, object] = {
-            "chat_id": channel,
-            "text": message_text,
-            "disable_web_page_preview": True,
-        }
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-
-        response = httpx.post(send_url, json=payload, timeout=60.0)
-        if response.is_success:
-            return
-
-        last_error = f"{response.status_code} {response.text.strip()}"
-        description = response.text.lower()
-        if index == 0 and "can't parse entities" not in description:
-            break
-
-    raise RuntimeError(f"Failed to send message to channel: {last_error}")
+    response = httpx.post(send_url, json=payload, timeout=60.0)
+    if not response.is_success:
+        raise RuntimeError(
+            f"Failed to send message to channel: "
+            f"{response.status_code} {response.text.strip()}"
+        )
 
 
 def build_summary(
