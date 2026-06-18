@@ -34,6 +34,26 @@ MAX_OPENROUTER_EMPTY_CONTENT_RETRIES = 3
 OPENROUTER_RETRYABLE_STATUS_CODES = {429, 503}
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
+LOG_PREVIEW_MAX_CHARS = 4000
+
+
+def print_section(title: str) -> None:
+    line = "=" * 60
+    print(f"\n{line}\n {title}\n{line}")
+
+
+def print_text_block(label: str, text: str, max_chars: int = LOG_PREVIEW_MAX_CHARS) -> None:
+    print(f"{label} ({len(text)} chars):")
+    if len(text) <= max_chars:
+        print(text)
+        return
+    print(text[:max_chars])
+    print(f"... [truncated, {len(text) - max_chars} more chars]")
+
+
+def print_json_block(label: str, data: object, max_chars: int = LOG_PREVIEW_MAX_CHARS) -> None:
+    formatted = json.dumps(data, ensure_ascii=False, indent=2)
+    print_text_block(label, formatted, max_chars=max_chars)
 
 
 def build_message_links(
@@ -99,8 +119,44 @@ def parse_retry_after_seconds(response: httpx.Response) -> float:
     return 20.0
 
 
-def request_openrouter_completion(api_key: str, model: str, prompt: str) -> dict:
-    for attempt in range(1, MAX_OPENROUTER_RETRIES + 1):
+def log_openrouter_request(model: str, prompt: str, attempt: int) -> None:
+    print_section(f"OpenRouter request (attempt {attempt}/{MAX_OPENROUTER_RETRIES})")
+    print(f"URL: {OPENROUTER_API_URL}")
+    print(f"Model: {model}")
+    print(f"Temperature: 0.3, max_tokens: 2048")
+    print_text_block("Prompt", prompt)
+
+
+def log_openrouter_response(payload: dict) -> None:
+    print_section("OpenRouter API response")
+    print(f"Response id: {payload.get('id')}")
+    print(f"Model: {payload.get('model')}")
+
+    usage = payload.get("usage")
+    if usage:
+        print_json_block("Usage", usage, max_chars=500)
+
+    choices = payload.get("choices") or []
+    print(f"Choices: {len(choices)}")
+    for index, choice in enumerate(choices):
+        message = choice.get("message") or {}
+        content = message.get("content")
+        print(f"Choice {index}: finish_reason={choice.get('finish_reason')!r}")
+        if choice.get("error"):
+            print_json_block(f"Choice {index} error", choice["error"], max_chars=2000)
+        if content is not None:
+            print_text_block(f"Choice {index} content", str(content))
+
+
+def request_openrouter_completion(
+    api_key: str,
+    model: str,
+    prompt: str,
+    *,
+    attempt: int = 1,
+) -> dict:
+    log_openrouter_request(model, prompt, attempt)
+    for attempt in range(attempt, MAX_OPENROUTER_RETRIES + 1):
         response = httpx.post(
             OPENROUTER_API_URL,
             headers={
@@ -118,7 +174,12 @@ def request_openrouter_completion(api_key: str, model: str, prompt: str) -> dict
             timeout=120.0,
         )
         if response.is_success:
-            return response.json()
+            payload = response.json()
+            log_openrouter_response(payload)
+            return payload
+
+        print_section(f"OpenRouter API error ({response.status_code})")
+        print_text_block("Response body", response.text.strip(), max_chars=8000)
 
         if (
             response.status_code in OPENROUTER_RETRYABLE_STATUS_CODES
@@ -131,6 +192,7 @@ def request_openrouter_completion(api_key: str, model: str, prompt: str) -> dict
                 f"({attempt}/{MAX_OPENROUTER_RETRIES})..."
             )
             time.sleep(wait_seconds)
+            log_openrouter_request(model, prompt, attempt + 1)
             continue
 
         detail = response.text.strip()
@@ -252,6 +314,8 @@ def summarize_with_openrouter(
         payload = request_openrouter_completion(api_key, OPENROUTER_MODEL, prompt)
         try:
             summary = extract_openrouter_content(payload)
+            print_section("OpenRouter extracted summary (raw)")
+            print_text_block("Summary", summary)
             break
         except RuntimeError as exc:
             if attempt >= MAX_OPENROUTER_EMPTY_CONTENT_RETRIES:
@@ -263,9 +327,18 @@ def summarize_with_openrouter(
             time.sleep(2.0)
 
     summary = normalize_telegram_html(summary)
+    print_section("Summary after HTML normalization")
+    print_text_block("Summary", summary)
+
     summary = inject_message_links(summary, message_links)
+    print_section("Summary after message link injection")
+    print_text_block("Summary", summary)
 
     if len(summary) > MAX_TELEGRAM_MESSAGE_LENGTH:
+        print(
+            f"Summary exceeds Telegram limit "
+            f"({len(summary)} > {MAX_TELEGRAM_MESSAGE_LENGTH}), truncating..."
+        )
         summary = summary[: MAX_TELEGRAM_MESSAGE_LENGTH - 3] + "..."
 
     return summary
@@ -304,7 +377,21 @@ def send_to_channel(text: str) -> None:
         "disable_web_page_preview": True,
     }
 
+    print_section("Telegram message to send")
+    print(f"Channel: {channel}")
+    print(f"Parse mode: HTML")
+    print(f"Length: {len(text)} chars (limit {MAX_TELEGRAM_MESSAGE_LENGTH})")
+    print_text_block("Message text", text, max_chars=MAX_TELEGRAM_MESSAGE_LENGTH)
+
     response = httpx.post(send_url, json=payload, timeout=60.0)
+
+    print_section("Telegram API response")
+    print(f"Status: {response.status_code}")
+    try:
+        print_json_block("Response body", response.json(), max_chars=8000)
+    except json.JSONDecodeError:
+        print_text_block("Response body", response.text.strip(), max_chars=8000)
+
     if not response.is_success:
         raise RuntimeError(
             f"Failed to send message to channel: "
@@ -319,20 +406,35 @@ def build_summary(
 ) -> str:
     messages = fetch_result.messages
     if not messages:
+        print("No messages to summarize, using empty summary template.")
         return build_empty_summary()
 
     messages_text = build_messages_text(messages, fetch_result.topic_titles, tz)
     if not messages_text.strip():
+        print("Messages text is empty after filtering, using empty summary template.")
         return build_empty_summary()
+
+    print_section("Input for OpenRouter")
+    print(f"Messages: {len(messages)}")
+    print_json_block("Topic titles", fetch_result.topic_titles, max_chars=2000)
+    print_text_block("Messages text", messages_text)
 
     message_links = build_message_links(
         messages,
         fetch_result.username,
         fetch_result.chat_id,
     )
+    print_section("Message links for summary")
+    print_json_block("Links", message_links, max_chars=8000)
+
     print(f"Generating summary with OpenRouter ({OPENROUTER_MODEL})...")
     summary = summarize_with_openrouter(messages_text, period_label, message_links)
-    return ensure_summary_header(summary)
+    summary = ensure_summary_header(summary)
+
+    print_section("Final summary (ready for Telegram)")
+    print_text_block("Summary", summary, max_chars=MAX_TELEGRAM_MESSAGE_LENGTH)
+
+    return summary
 
 
 async def run() -> None:
@@ -345,22 +447,38 @@ async def run() -> None:
         f"{period_end.astimezone(tz).strftime('%d.%m.%Y')}"
     )
 
-    print(f"Fetching messages for period: {period_label}")
+    print_section("Daily summary run")
+    print(f"Group: {group}")
+    print(f"Timezone: {tz}")
+    print(f"Period (local): {period_label}")
+    print(
+        f"Period (UTC): {period_start.isoformat()} — {period_end.isoformat()}"
+    )
+
+    print(f"\nFetching messages for period: {period_label}")
     fetch_result = await fetch_group_messages_for_period(
         group,
         period_start,
         period_end,
     )
-    print(
-        f"Found {len(fetch_result.messages)} messages "
-        f"in {len({message.topic_id for message in fetch_result.messages})} topics"
-    )
+
+    topic_ids = {message.topic_id for message in fetch_result.messages}
+    print_section("Fetched messages")
+    print(f"Chat id: {fetch_result.chat_id}")
+    print(f"Username: {fetch_result.username or '(private)'}")
+    print(f"Messages: {len(fetch_result.messages)}")
+    print(f"Topics with messages: {len(topic_ids)}")
+    for topic_id in sorted(topic_ids, key=lambda tid: (tid != GENERAL_TOPIC_ID, tid)):
+        title = fetch_result.topic_titles.get(topic_id, f"Тема {topic_id}")
+        count = sum(1 for message in fetch_result.messages if message.topic_id == topic_id)
+        print(f"  - {title} (topic_id={topic_id}): {count} messages")
 
     summary = build_summary(fetch_result, period_label, tz)
 
-    print("Sending summary to channel...")
+    print("\nSending summary to channel...")
     send_to_channel(summary)
-    print("Done.")
+    print_section("Done")
+    print("Summary posted successfully.")
 
 
 def main() -> None:
