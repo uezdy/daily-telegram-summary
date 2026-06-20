@@ -34,7 +34,16 @@ MAX_YANDEXGPT_RETRIES = 5
 YANDEXGPT_RETRYABLE_STATUS_CODES = {429, 503}
 TELEGRAM_ALLOWED_HTML_TAGS = frozenset({"b", "i", "a", "strong", "em"})
 TELEGRAM_HTML_TAG_PATTERN = r"</?(?:a|b|i)(?:\s[^>]*)?>"
-MSG_MARKER_PATTERN = re.compile(r"\[\[msg:(\d+)\]\]|\[msg:(\d+)\](?!\])")
+MSG_MARKER_PATTERN = re.compile(r"\[\[msg:(\d+)\]\]|\[msg:(\d+)\]")
+TME_URL_PATTERN = re.compile(r"https://t\.me/[^\s\)\]\>,]+")
+MODEL_LINK_PATTERN = re.compile(
+    r"↗?\s*\(\s*(https://t\.me/[^\s\)\]\>,]+)\s*\)",
+    re.IGNORECASE,
+)
+LINK_CLUSTER_PATTERN = re.compile(
+    r"\[([^\]\n]*(?:<a href=\"[^\"]+\">↗</a>|↗|https://t\.me)[^\]\n]*)\]",
+    re.IGNORECASE,
+)
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
 LOG_PREVIEW_MAX_CHARS = 4000
@@ -122,6 +131,17 @@ def parse_retry_after_seconds(response: httpx.Response) -> float:
     return 20.0
 
 
+def log_yandexgpt_request(model: str, prompt: str, attempt: int = 1) -> None:
+    print_section(f"YandexGPT request (attempt {attempt})")
+    print(f"Model: {model}")
+    print_text_block("Prompt", prompt)
+
+
+def log_yandexgpt_response(payload: dict) -> None:
+    print_section("YandexGPT API response")
+    print_json_block("Response payload", payload)
+
+
 def get_yandexgpt_model() -> str:
     model = os.environ.get("YANDEXGPT_MODEL", YANDEXGPT_DEFAULT_MODEL).strip()
     return model or YANDEXGPT_DEFAULT_MODEL
@@ -154,10 +174,10 @@ def request_yandexgpt_completion(
         )
         if response.is_success:
             payload = response.json()
-            log_openrouter_response(payload)
+            log_yandexgpt_response(payload)
             return payload
 
-        print_section(f"OpenRouter API error ({response.status_code})")
+        print_section(f"YandexGPT API error ({response.status_code})")
         print_text_block("Response body", response.text.strip(), max_chars=8000)
 
         if (
@@ -171,7 +191,7 @@ def request_yandexgpt_completion(
                 f"({attempt}/{MAX_YANDEXGPT_RETRIES})..."
             )
             time.sleep(wait_seconds)
-            log_openrouter_request(model, prompt, attempt + 1)
+            log_yandexgpt_request(model, prompt, attempt + 1)
             continue
 
         detail = response.text.strip()
@@ -180,40 +200,6 @@ def request_yandexgpt_completion(
         )
 
     raise RuntimeError(f"YandexGPT request failed after {MAX_YANDEXGPT_RETRIES} retries")
-
-
-def extract_openrouter_content(payload: dict) -> str:
-    try:
-        choice = payload["choices"][0]
-        message = choice["message"]
-        content = message.get("content")
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected OpenRouter response: {payload}") from exc
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                text = part.get("text")
-                if text:
-                    parts.append(text)
-        content = "\n".join(parts)
-
-    if not isinstance(content, str):
-        finish_reason = choice.get("finish_reason")
-        error = choice.get("error")
-        raise RuntimeError(
-            "OpenRouter returned empty content "
-            f"(finish_reason={finish_reason!r}, error={error!r})"
-        )
-
-    summary = content.strip()
-    if not summary:
-        finish_reason = choice.get("finish_reason")
-        raise RuntimeError(
-            f"OpenRouter returned blank content (finish_reason={finish_reason!r})"
-        )
-    return summary
 
 
 def build_summary_prompt(messages_text: str, period_label: str) -> str:
@@ -234,6 +220,7 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 - Пропускай темы без значимых обсуждений за сутки.
 - Внутри темы: тезисы через «• <b>Краткий заголовок</b>: описание»; подпункты через «- ».
 - После важного тезиса добавляй ссылку на источник маркером [[msg:ID]] (1–3 ID на тезис). Ставь маркер после текста тезиса, вне HTML-тегов (не внутри <b> или <i>). Используй только ID из входных [msg:ID]. Не выдумывай ID.
+- Не пиши ссылки t.me, символ ↗ и URL самостоятельно — только маркеры [[msg:ID]].
 - Только теги <b> и <i>. Без <ul>, <ol>, <li>, <p>, <br>, <a>, без Markdown (** или __).
 - Без markdown code blocks (```). Начинай сразу с HTML, без обёртки.
 - Только переносы строк между блоками.
@@ -345,17 +332,79 @@ def move_links_outside_formatting(text: str) -> str:
     return text
 
 
-def inject_message_links(text: str, message_links: dict[int, str]) -> str:
-    def replace_marker(match: re.Match[str]) -> str:
-        raw_id = match.group(1) or match.group(2)
-        message_id = int(raw_id)
-        url = message_links.get(message_id)
-        if not url:
-            return ""
-        escaped_url = html.escape(url, quote=True)
-        return f'<a href="{escaped_url}">↗</a>'
+def format_message_link(message_id: int, message_links: dict[int, str]) -> str:
+    url = message_links.get(message_id)
+    if not url:
+        return ""
+    escaped_url = html.escape(url, quote=True)
+    return f'<a href="{escaped_url}">↗</a>'
 
-    text = MSG_MARKER_PATTERN.sub(replace_marker, text)
+
+def extract_message_id_from_tme_url(url: str) -> int | None:
+    try:
+        path = url.split("?", 1)[0].rstrip("/")
+        return int(path.rsplit("/", 1)[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def link_from_tme_url(url: str, message_links: dict[int, str]) -> str:
+    message_id = extract_message_id_from_tme_url(url)
+    if message_id is not None:
+        link = format_message_link(message_id, message_links)
+        if link:
+            return link
+    escaped_url = html.escape(url, quote=True)
+    return f'<a href="{escaped_url}">↗</a>'
+
+
+def replace_message_markers(text: str, message_links: dict[int, str]) -> str:
+    def replace_marker(match: re.Match[str]) -> str:
+        message_id = int(match.group(1) or match.group(2))
+        return format_message_link(message_id, message_links)
+
+    return MSG_MARKER_PATTERN.sub(replace_marker, text)
+
+
+def replace_model_invented_links(text: str, message_links: dict[int, str]) -> str:
+    def replace_model_link(match: re.Match[str]) -> str:
+        return link_from_tme_url(match.group(1), message_links)
+
+    text = MODEL_LINK_PATTERN.sub(replace_model_link, text)
+
+    def replace_bare_url(match: re.Match[str]) -> str:
+        start = match.start()
+        if start >= 6 and text[start - 6 : start] == 'href="':
+            return match.group(0)
+        return link_from_tme_url(match.group(0), message_links)
+
+    return TME_URL_PATTERN.sub(replace_bare_url, text)
+
+
+def cleanup_link_clusters(text: str, message_links: dict[int, str]) -> str:
+    def unwrap_cluster(match: re.Match[str]) -> str:
+        inner = replace_message_markers(match.group(1), message_links)
+        inner = replace_model_invented_links(inner, message_links)
+        inner = re.sub(r"[\[\]]", "", inner)
+        inner = re.sub(r"\s*,\s*", " ", inner)
+        inner = re.sub(r"\s{2,}", " ", inner)
+        return inner.strip()
+
+    prev = None
+    while prev != text:
+        prev = text
+        text = LINK_CLUSTER_PATTERN.sub(unwrap_cluster, text)
+
+    text = replace_message_markers(text, message_links)
+    text = MSG_MARKER_PATTERN.sub("", text)
+    text = re.sub(r"\[\s*\]", "", text)
+    return text
+
+
+def inject_message_links(text: str, message_links: dict[int, str]) -> str:
+    text = replace_message_markers(text, message_links)
+    text = replace_model_invented_links(text, message_links)
+    text = cleanup_link_clusters(text, message_links)
     return move_links_outside_formatting(text)
 
 
@@ -368,6 +417,7 @@ def summarize_with_yandexgpt(
     folder_id = require_env("YANDEX_CLOUD_FOLDER_ID")
     model = get_yandexgpt_model()
     prompt = build_summary_prompt(messages_text, period_label)
+    log_yandexgpt_request(model, prompt)
     payload = request_yandexgpt_completion(api_key, folder_id, model, prompt)
 
     try:
@@ -437,20 +487,24 @@ def send_to_channel(text: str) -> None:
         if parse_mode:
             payload["parse_mode"] = parse_mode
 
-    response = httpx.post(send_url, json=payload, timeout=60.0)
+        response = httpx.post(send_url, json=payload, timeout=60.0)
 
-    print_section("Telegram API response")
-    print(f"Status: {response.status_code}")
-    try:
-        print_json_block("Response body", response.json(), max_chars=8000)
-    except json.JSONDecodeError:
-        print_text_block("Response body", response.text.strip(), max_chars=8000)
+        print_section("Telegram API response")
+        print(f"Status: {response.status_code}")
+        try:
+            print_json_block("Response body", response.json(), max_chars=8000)
+        except json.JSONDecodeError:
+            print_text_block("Response body", response.text.strip(), max_chars=8000)
 
-    if not response.is_success:
-        raise RuntimeError(
-            f"Failed to send message to channel: "
-            f"{response.status_code} {response.text.strip()}"
-        )
+        if response.is_success:
+            return
+
+        last_error = f"{response.status_code} {response.text.strip()}"
+        description = response.text.lower()
+        if index == 0 and "can't parse entities" not in description:
+            break
+
+    raise RuntimeError(f"Failed to send message to channel: {last_error}")
 
 
 def build_summary(
@@ -468,7 +522,7 @@ def build_summary(
         print("Messages text is empty after filtering, using empty summary template.")
         return build_empty_summary()
 
-    print_section("Input for OpenRouter")
+    print_section("Input for YandexGPT")
     print(f"Messages: {len(messages)}")
     print_json_block("Topic titles", fetch_result.topic_titles, max_chars=2000)
     print_text_block("Messages text", messages_text)
