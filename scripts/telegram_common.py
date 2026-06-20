@@ -52,7 +52,10 @@ def get_timezone() -> ZoneInfo:
     try:
         return ZoneInfo(tz_name)
     except Exception as exc:
-        raise RuntimeError(f"Invalid TIMEZONE: {tz_name}") from exc
+        hint = ""
+        if os.name == "nt":
+            hint = " On Windows install IANA timezones: pip install tzdata"
+        raise RuntimeError(f"Invalid TIMEZONE: {tz_name}.{hint}") from exc
 
 
 def get_summary_period(tz: ZoneInfo) -> tuple[datetime, datetime]:

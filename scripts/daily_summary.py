@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 import sys
 import time
@@ -27,11 +28,13 @@ from telegram_common import (
 
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 MAX_SUMMARY_LENGTH = 3800
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "openrouter/free"
-MAX_OPENROUTER_RETRIES = 5
-MAX_OPENROUTER_EMPTY_CONTENT_RETRIES = 3
-OPENROUTER_RETRYABLE_STATUS_CODES = {429, 503}
+YANDEXGPT_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+YANDEXGPT_DEFAULT_MODEL = "yandexgpt-lite"
+MAX_YANDEXGPT_RETRIES = 5
+YANDEXGPT_RETRYABLE_STATUS_CODES = {429, 503}
+TELEGRAM_ALLOWED_HTML_TAGS = frozenset({"b", "i", "a", "strong", "em"})
+TELEGRAM_HTML_TAG_PATTERN = r"</?(?:a|b|i)(?:\s[^>]*)?>"
+MSG_MARKER_PATTERN = re.compile(r"\[\[msg:(\d+)\]\]|\[msg:(\d+)\](?!\])")
 SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
 SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
 LOG_PREVIEW_MAX_CHARS = 4000
@@ -119,57 +122,33 @@ def parse_retry_after_seconds(response: httpx.Response) -> float:
     return 20.0
 
 
-def log_openrouter_request(model: str, prompt: str, attempt: int) -> None:
-    print_section(f"OpenRouter request (attempt {attempt}/{MAX_OPENROUTER_RETRIES})")
-    print(f"URL: {OPENROUTER_API_URL}")
-    print(f"Model: {model}")
-    print(f"Temperature: 0.3, max_tokens: 2048")
-    print_text_block("Prompt", prompt)
+def get_yandexgpt_model() -> str:
+    model = os.environ.get("YANDEXGPT_MODEL", YANDEXGPT_DEFAULT_MODEL).strip()
+    return model or YANDEXGPT_DEFAULT_MODEL
 
 
-def log_openrouter_response(payload: dict) -> None:
-    print_section("OpenRouter API response")
-    print(f"Response id: {payload.get('id')}")
-    print(f"Model: {payload.get('model')}")
-
-    usage = payload.get("usage")
-    if usage:
-        print_json_block("Usage", usage, max_chars=500)
-
-    choices = payload.get("choices") or []
-    print(f"Choices: {len(choices)}")
-    for index, choice in enumerate(choices):
-        message = choice.get("message") or {}
-        content = message.get("content")
-        print(f"Choice {index}: finish_reason={choice.get('finish_reason')!r}")
-        if choice.get("error"):
-            print_json_block(f"Choice {index} error", choice["error"], max_chars=2000)
-        if content is not None:
-            print_text_block(f"Choice {index} content", str(content))
-
-
-def request_openrouter_completion(
+def request_yandexgpt_completion(
     api_key: str,
+    folder_id: str,
     model: str,
     prompt: str,
-    *,
-    attempt: int = 1,
 ) -> dict:
-    log_openrouter_request(model, prompt, attempt)
-    for attempt in range(attempt, MAX_OPENROUTER_RETRIES + 1):
+    model_uri = f"gpt://{folder_id}/{model}"
+    for attempt in range(1, MAX_YANDEXGPT_RETRIES + 1):
         response = httpx.post(
-            OPENROUTER_API_URL,
+            YANDEXGPT_API_URL,
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Api-Key {api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/uezdy/daily-telegram-summary",
-                "X-Title": "Daily Telegram Summary",
             },
             json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 2048,
+                "modelUri": model_uri,
+                "completionOptions": {
+                    "stream": False,
+                    "temperature": 0.3,
+                    "maxTokens": 2048,
+                },
+                "messages": [{"role": "user", "text": prompt}],
             },
             timeout=120.0,
         )
@@ -182,14 +161,14 @@ def request_openrouter_completion(
         print_text_block("Response body", response.text.strip(), max_chars=8000)
 
         if (
-            response.status_code in OPENROUTER_RETRYABLE_STATUS_CODES
-            and attempt < MAX_OPENROUTER_RETRIES
+            response.status_code in YANDEXGPT_RETRYABLE_STATUS_CODES
+            and attempt < MAX_YANDEXGPT_RETRIES
         ):
             wait_seconds = parse_retry_after_seconds(response)
             print(
-                f"OpenRouter rate limited ({model}), "
+                f"YandexGPT rate limited ({model}), "
                 f"retrying in {wait_seconds:.0f}s "
-                f"({attempt}/{MAX_OPENROUTER_RETRIES})..."
+                f"({attempt}/{MAX_YANDEXGPT_RETRIES})..."
             )
             time.sleep(wait_seconds)
             log_openrouter_request(model, prompt, attempt + 1)
@@ -197,10 +176,10 @@ def request_openrouter_completion(
 
         detail = response.text.strip()
         raise RuntimeError(
-            f"OpenRouter request failed ({response.status_code}): {detail}"
+            f"YandexGPT request failed ({response.status_code}): {detail}"
         )
 
-    raise RuntimeError(f"OpenRouter request failed after {MAX_OPENROUTER_RETRIES} retries")
+    raise RuntimeError(f"YandexGPT request failed after {MAX_YANDEXGPT_RETRIES} retries")
 
 
 def extract_openrouter_content(payload: dict) -> str:
@@ -254,10 +233,9 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 - Группируй резюме по темам форума из входных данных. Каждая тема — отдельный блок с заголовком <b>Название темы</b> (без topic_id).
 - Пропускай темы без значимых обсуждений за сутки.
 - Внутри темы: тезисы через «• <b>Краткий заголовок</b>: описание»; подпункты через «- ».
-- После важного тезиса добавляй ссылку на источник маркером [[msg:ID]] (1–3 ID на тезис). Используй только ID из входных [msg:ID]. Не выдумывай ID.
-- Если есть полезные рекомендации — общий блок «Советы:» со списком «- » (можно со ссылками [[msg:ID]]).
-- В конце: Игнорируем: флуд, мемы, мелкий оффтоп.
+- После важного тезиса добавляй ссылку на источник маркером [[msg:ID]] (1–3 ID на тезис). Ставь маркер после текста тезиса, вне HTML-тегов (не внутри <b> или <i>). Используй только ID из входных [msg:ID]. Не выдумывай ID.
 - Только теги <b> и <i>. Без <ul>, <ol>, <li>, <p>, <br>, <a>, без Markdown (** или __).
+- Без markdown code blocks (```). Начинай сразу с HTML, без обёртки.
 - Только переносы строк между блоками.
 
 Пример:
@@ -269,62 +247,133 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 <b>Библиотека/Ссылки</b>
 • <b>Новые материалы</b>: Опубликовали подборку по архивам. [[msg:456]]
 
-Советы:
-- Проверяйте правила отделения почты. [[msg:789]]
-
-Игнорируем: флуд, мемы, мелкий оффтоп.
-
 Сообщения:
 {messages_text}
 """
 
 
+def strip_markdown_code_fences(text: str) -> str:
+    """Remove ``` wrappers that some LLMs add around the response."""
+    normalized = text.strip()
+    normalized = re.sub(r"^```(?:\w+)?\s*\n?", "", normalized)
+    normalized = re.sub(r"\n?```\s*$", "", normalized)
+    return normalized.strip()
+
+
 def normalize_telegram_html(text: str) -> str:
     """Convert common Markdown patterns to Telegram HTML."""
-    normalized = text.strip()
+    normalized = strip_markdown_code_fences(text)
     normalized = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", normalized)
     normalized = re.sub(r"__(.+?)__", r"<b>\1</b>", normalized)
     normalized = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", normalized)
     normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
-    return normalized
+    return sanitize_telegram_html(normalized)
+
+
+def escape_telegram_html_text(text: str) -> str:
+    """Escape raw <, >, & outside allowed Telegram HTML tags."""
+    parts = re.split(f"({TELEGRAM_HTML_TAG_PATTERN})", text, flags=re.IGNORECASE)
+    escaped: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            escaped.append(part)
+            continue
+        escaped.append(
+            re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", part)
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+    return "".join(escaped)
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """Keep only Telegram-supported tags and fix common entity issues."""
+    sanitized = re.sub(r"<strong>", "<b>", text, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</strong>", "</b>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"<em>", "<i>", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</em>", "</i>", sanitized, flags=re.IGNORECASE)
+    sanitized = escape_telegram_html_text(sanitized)
+
+    allowed = "|".join(sorted(TELEGRAM_ALLOWED_HTML_TAGS))
+    sanitized = re.sub(
+        rf"<(?!/)(?!{allowed}\b)[^>]*>",
+        "",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        rf"</(?!{allowed}\b)[^>]*>",
+        "",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
+
+def strip_html_tags(text: str) -> str:
+    plain = strip_markdown_code_fences(text)
+    plain = re.sub(r"<[^>]+>", "", plain)
+    return html.unescape(plain)
+
+
+def html_to_plain_with_links(text: str) -> str:
+    def link_replacer(match: re.Match[str]) -> str:
+        url = html.unescape(match.group(1))
+        return f" ↗ {url}"
+
+    with_links = re.sub(
+        r'<a href="([^"]+)">↗</a>',
+        link_replacer,
+        text,
+        flags=re.IGNORECASE,
+    )
+    return strip_html_tags(with_links)
+
+
+def move_links_outside_formatting(text: str) -> str:
+    """Telegram HTML does not allow <a> tags inside <b> or <i>."""
+    for _ in range(5):
+        updated = re.sub(
+            r'<([bi])>((?:(?!\1>).)*?)<a href="([^"]+)">↗</a>((?:(?!\1>).)*?)</\1>',
+            r'<a href="\3">↗</a> <\1>\2\4</\1>',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if updated == text:
+            return text
+        text = updated
+    return text
 
 
 def inject_message_links(text: str, message_links: dict[int, str]) -> str:
     def replace_marker(match: re.Match[str]) -> str:
-        message_id = int(match.group(1))
+        raw_id = match.group(1) or match.group(2)
+        message_id = int(raw_id)
         url = message_links.get(message_id)
         if not url:
             return ""
         escaped_url = html.escape(url, quote=True)
         return f'<a href="{escaped_url}">↗</a>'
 
-    return re.sub(r"\[\[msg:(\d+)\]\]", replace_marker, text)
+    text = MSG_MARKER_PATTERN.sub(replace_marker, text)
+    return move_links_outside_formatting(text)
 
 
-def summarize_with_openrouter(
+def summarize_with_yandexgpt(
     messages_text: str,
     period_label: str,
     message_links: dict[int, str],
 ) -> str:
-    api_key = require_env("OPENROUTER_API_KEY")
+    api_key = require_env("YANDEX_CLOUD_API_KEY")
+    folder_id = require_env("YANDEX_CLOUD_FOLDER_ID")
+    model = get_yandexgpt_model()
     prompt = build_summary_prompt(messages_text, period_label)
+    payload = request_yandexgpt_completion(api_key, folder_id, model, prompt)
 
-    summary = ""
-    for attempt in range(1, MAX_OPENROUTER_EMPTY_CONTENT_RETRIES + 1):
-        payload = request_openrouter_completion(api_key, OPENROUTER_MODEL, prompt)
-        try:
-            summary = extract_openrouter_content(payload)
-            print_section("OpenRouter extracted summary (raw)")
-            print_text_block("Summary", summary)
-            break
-        except RuntimeError as exc:
-            if attempt >= MAX_OPENROUTER_EMPTY_CONTENT_RETRIES:
-                raise
-            print(
-                f"{exc}, retrying "
-                f"({attempt}/{MAX_OPENROUTER_EMPTY_CONTENT_RETRIES})..."
-            )
-            time.sleep(2.0)
+    try:
+        summary = payload["result"]["alternatives"][0]["message"]["text"].strip()
+    except (KeyError, IndexError) as exc:
+        raise RuntimeError(f"Unexpected YandexGPT response: {payload}") from exc
 
     summary = normalize_telegram_html(summary)
     print_section("Summary after HTML normalization")
@@ -370,18 +419,23 @@ def send_to_channel(text: str) -> None:
     channel = require_env("TELEGRAM_CHANNEL")
     send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    payload: dict[str, object] = {
-        "chat_id": channel,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    attempts: list[tuple[str, str | None]] = [
+        (sanitize_telegram_html(text), "HTML"),
+        (html_to_plain_with_links(text), None),
+    ]
 
-    print_section("Telegram message to send")
-    print(f"Channel: {channel}")
-    print(f"Parse mode: HTML")
-    print(f"Length: {len(text)} chars (limit {MAX_TELEGRAM_MESSAGE_LENGTH})")
-    print_text_block("Message text", text, max_chars=MAX_TELEGRAM_MESSAGE_LENGTH)
+    last_error = "unknown error"
+    for index, (message_text, parse_mode) in enumerate(attempts):
+        if index > 0:
+            print("Telegram rejected HTML formatting, retrying as plain text...")
+
+        payload: dict[str, object] = {
+            "chat_id": channel,
+            "text": message_text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
     response = httpx.post(send_url, json=payload, timeout=60.0)
 
@@ -424,17 +478,10 @@ def build_summary(
         fetch_result.username,
         fetch_result.chat_id,
     )
-    print_section("Message links for summary")
-    print_json_block("Links", message_links, max_chars=8000)
-
-    print(f"Generating summary with OpenRouter ({OPENROUTER_MODEL})...")
-    summary = summarize_with_openrouter(messages_text, period_label, message_links)
-    summary = ensure_summary_header(summary)
-
-    print_section("Final summary (ready for Telegram)")
-    print_text_block("Summary", summary, max_chars=MAX_TELEGRAM_MESSAGE_LENGTH)
-
-    return summary
+    model = get_yandexgpt_model()
+    print(f"Generating summary with YandexGPT ({model})...")
+    summary = summarize_with_yandexgpt(messages_text, period_label, message_links)
+    return ensure_summary_header(summary)
 
 
 async def run() -> None:

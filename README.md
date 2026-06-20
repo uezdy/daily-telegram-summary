@@ -1,11 +1,11 @@
 # Daily Telegram Summary
 
-Автоматический пайплайн: раз в сутки читает сообщения из телеграм-группы, формирует краткое резюме с помощью [OpenRouter](https://openrouter.ai) (бесплатные модели) и публикует его в канал через бота.
+Автоматический пайплайн: раз в сутки читает сообщения из телеграм-группы, формирует краткое резюме с помощью [YandexGPT](https://yandex.cloud/docs/foundation-models/) и публикует его в канал через бота.
 
 ## Как это работает
 
 1. **Telethon** (user API) загружает текстовые сообщения группы за предыдущие календарные сутки.
-2. **OpenRouter** анализирует переписку и выделяет важные обсуждения.
+2. **YandexGPT** анализирует переписку и выделяет важные обсуждения.
 3. **Telegram Bot API** отправляет итоговое сообщение в канал.
 4. **GitHub Actions** запускает скрипт каждый день в 09:15 Europe/Minsk.
 
@@ -19,7 +19,9 @@
 | `TELEGRAM_GROUP` | Группа-источник: `@username` или `-100...` |
 | `TELEGRAM_BOT_TOKEN` | Токен бота от [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHANNEL` | Канал назначения: `@channel` или `-100...` |
-| `OPENROUTER_API_KEY` | API-ключ [OpenRouter](https://openrouter.ai/keys) |
+| `YANDEX_CLOUD_API_KEY` | API-ключ сервисного аккаунта Yandex Cloud |
+| `YANDEX_CLOUD_FOLDER_ID` | ID каталога (folder) в Yandex Cloud |
+| `YANDEXGPT_MODEL` | Модель YandexGPT (по умолчанию `yandexgpt-lite`) |
 | `TIMEZONE` | Часовой пояс для границ «суток» (по умолчанию `Europe/Minsk`) |
 
 Скопируйте `.env.example` в `.env` для локального запуска.
@@ -43,13 +45,13 @@ python scripts/create_session.py
 2. Добавьте бота в канал как администратора с правом публикации.
 3. Укажите `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHANNEL`.
 
-### 3. OpenRouter API
+### 3. YandexGPT API
 
-1. Зарегистрируйтесь на [openrouter.ai](https://openrouter.ai).
-2. Создайте ключ на [openrouter.ai/keys](https://openrouter.ai/keys).
-3. Укажите `OPENROUTER_API_KEY` в `.env` и GitHub Secrets.
+1. Создайте каталог в [Yandex Cloud](https://console.cloud.yandex.ru/).
+2. Включите сервис Foundation Models и создайте API-ключ сервисного аккаунта с ролью `ai.languageModels.user`.
+3. Укажите `YANDEX_CLOUD_API_KEY` и `YANDEX_CLOUD_FOLDER_ID` в `.env` и GitHub Secrets.
 
-Модель зашита в коде: `openrouter/free` (бесплатный роутер OpenRouter). Список бесплатных моделей: [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0).
+По умолчанию используется модель `yandexgpt-lite`. Другую модель можно задать через `YANDEXGPT_MODEL` (например, `yandexgpt`).
 
 ### 4. GitHub Secrets
 

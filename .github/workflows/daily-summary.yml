@@ -33,6 +33,8 @@ jobs:
           TELEGRAM_GROUP: ${{ secrets.TELEGRAM_GROUP }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          YANDEX_CLOUD_API_KEY: ${{ secrets.YANDEX_CLOUD_API_KEY }}
+          YANDEX_CLOUD_FOLDER_ID: ${{ secrets.YANDEX_CLOUD_FOLDER_ID }}
+          YANDEXGPT_MODEL: ${{ vars.YANDEXGPT_MODEL }}
           TIMEZONE: ${{ vars.TIMEZONE }}
         run: python scripts/daily_summary.py
