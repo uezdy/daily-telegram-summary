@@ -58,11 +58,36 @@ def get_timezone() -> ZoneInfo:
         raise RuntimeError(f"Invalid TIMEZONE: {tz_name}.{hint}") from exc
 
 
+def get_summary_period_days() -> int:
+    raw = os.environ.get("SUMMARY_PERIOD_DAYS", "2").strip() or "2"
+    try:
+        days = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid SUMMARY_PERIOD_DAYS: {raw}") from exc
+    if days < 1:
+        raise RuntimeError("SUMMARY_PERIOD_DAYS must be >= 1")
+    return days
+
+
+def format_summary_period_label(days: int) -> str:
+    if days == 1:
+        return "сутки"
+    if days == 2:
+        return "двое суток"
+    return f"{days} суток"
+
+
+def get_summary_header(days: int | None = None) -> str:
+    period_days = days if days is not None else get_summary_period_days()
+    period_label = format_summary_period_label(period_days)
+    return f"Уезды Беларуси, обсуждения за {period_label}:"
+
+
 def get_summary_period(tz: ZoneInfo) -> tuple[datetime, datetime]:
-    """Return UTC bounds for the previous calendar day in the given timezone."""
+    """Return UTC bounds for the previous N calendar days in the given timezone."""
     now_local = datetime.now(tz)
     period_end_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    period_start_local = period_end_local - timedelta(days=1)
+    period_start_local = period_end_local - timedelta(days=get_summary_period_days())
 
     period_start = period_start_local.astimezone(timezone.utc)
     period_end = period_end_local.astimezone(timezone.utc)

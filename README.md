@@ -1,13 +1,13 @@
 # Daily Telegram Summary
 
-Автоматический пайплайн: раз в сутки читает сообщения из телеграм-группы, формирует краткое резюме с помощью [YandexGPT](https://yandex.cloud/docs/foundation-models/) и публикует его в канал через бота.
+Автоматический пайплайн: раз в двое суток читает сообщения из телеграм-группы, формирует краткое резюме с помощью [YandexGPT](https://yandex.cloud/docs/foundation-models/) и публикует его в канал через бота.
 
 ## Как это работает
 
-1. **Telethon** (user API) загружает текстовые сообщения группы за предыдущие календарные сутки.
+1. **Telethon** (user API) загружает текстовые сообщения группы за предыдущие два календарных дня.
 2. **YandexGPT** анализирует переписку и выделяет важные обсуждения.
 3. **Telegram Bot API** отправляет итоговое сообщение в канал.
-4. **GitHub Actions** запускает скрипт каждый день в 09:15 Europe/Minsk.
+4. **GitHub Actions** запускает скрипт раз в двое суток в 09:15 Europe/Minsk.
 
 ## Переменные окружения
 
@@ -22,7 +22,8 @@
 | `YANDEX_CLOUD_API_KEY` | API-ключ сервисного аккаунта Yandex Cloud |
 | `YANDEX_CLOUD_FOLDER_ID` | ID каталога (folder) в Yandex Cloud |
 | `YANDEXGPT_MODEL` | Модель YandexGPT (по умолчанию `yandexgpt-lite`) |
-| `TIMEZONE` | Часовой пояс для границ «суток» (по умолчанию `Europe/Minsk`) |
+| `TIMEZONE` | Часовой пояс для границ периода (по умолчанию `Europe/Minsk`) |
+| `SUMMARY_PERIOD_DAYS` | Сколько последних календарных дней включать в резюме (по умолчанию `2`) |
 
 Скопируйте `.env.example` в `.env` для локального запуска.
 
@@ -70,15 +71,15 @@ python scripts/daily_summary.py
 
 ## Расписание
 
-По умолчанию workflow запускается **каждый день в 09:15 Europe/Minsk** (06:15 UTC). Чтобы изменить время, отредактируйте cron в `.github/workflows/daily-summary.yml`:
+По умолчанию workflow запускается **раз в двое суток в 09:15 Europe/Minsk** (06:15 UTC). Чтобы изменить время, отредактируйте cron в `.github/workflows/daily-summary.yml`:
 
 ```yaml
-- cron: '15 6 * * *'  # минуты часы день_месяца месяц день_недели (UTC)
+- cron: '15 6 */2 * *'  # минуты часы день_месяца месяц день_недели (UTC)
 ```
 
 Примеры:
 
-- `15 6 * * 2-6` — 06:15 UTC (09:15 Minsk), вт–сб
+- `15 6 */2 * *` — 06:15 UTC (09:15 Minsk), каждые 2 дня месяца (1, 3, 5…)
 - `15 6 * * *` — 06:15 UTC (09:15 Minsk), каждый день
 - `40 12 * * *` — 12:40 UTC (15:40 Minsk), каждый день
 
@@ -88,9 +89,9 @@ python scripts/daily_summary.py
 
 ```
 scripts/
-  telegram_common.py   # env, клиент Telethon, период суток
+  telegram_common.py   # env, клиент Telethon, период выборки
   create_session.py    # генерация TELEGRAM_SESSION
   daily_summary.py     # основной пайплайн
 .github/workflows/
-  daily-summary.yml    # ежедневный cron
+  daily-summary.yml    # cron раз в двое суток
 ```
