@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch group messages for the last day, summarize with AI, post to a channel."""
+"""Fetch group messages for the last N days, summarize with AI, post to a channel."""
 
 from __future__ import annotations
 
@@ -21,7 +21,10 @@ from telegram_common import (
     GroupFetchResult,
     build_message_link,
     fetch_group_messages_for_period,
+    format_summary_period_label,
+    get_summary_header,
     get_summary_period,
+    get_summary_period_days,
     get_timezone,
     require_env,
 )
@@ -44,8 +47,6 @@ LINK_CLUSTER_PATTERN = re.compile(
     r"\[([^\]\n]*(?:<a href=\"[^\"]+\">↗</a>|↗|https://t\.me)[^\]\n]*)\]",
     re.IGNORECASE,
 )
-SUMMARY_HEADER = "Уезды Беларуси, обсуждения за сутки:"
-SUMMARY_HEADER_HTML = f"<b>{SUMMARY_HEADER}</b>"
 LOG_PREVIEW_MAX_CHARS = 4000
 
 
@@ -202,8 +203,14 @@ def request_yandexgpt_completion(
     raise RuntimeError(f"YandexGPT request failed after {MAX_YANDEXGPT_RETRIES} retries")
 
 
-def build_summary_prompt(messages_text: str, period_label: str) -> str:
-    return f"""Ты помощник для телеграм-сообщества. Проанализируй сообщения из группы за сутки ({period_label}).
+def build_summary_prompt(
+    messages_text: str,
+    period_label: str,
+    period_days: int,
+    summary_header: str,
+) -> str:
+    period_description = format_summary_period_label(period_days)
+    return f"""Ты помощник для телеграм-сообщества. Проанализируй сообщения из группы за {period_description} ({period_label}).
 
 Входные данные сгруппированы по темам форума (topic). Каждое сообщение помечено как [msg:ID].
 
@@ -215,9 +222,9 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 5. Не превышай {MAX_SUMMARY_LENGTH} символов.
 
 Формат (строго HTML Telegram, parse_mode=HTML):
-- Заголовок: <b>{SUMMARY_HEADER}</b>
+- Заголовок: <b>{summary_header}</b>
 - Группируй резюме по темам форума из входных данных. Каждая тема — отдельный блок с заголовком <b>Название темы</b> (без topic_id).
-- Пропускай темы без значимых обсуждений за сутки.
+- Пропускай темы без значимых обсуждений за {period_description}.
 - Внутри темы: тезисы через «• <b>Краткий заголовок</b>: описание»; подпункты через «- ».
 - После важного тезиса добавляй ссылку на источник маркером [[msg:ID]] (1–3 ID на тезис). Ставь маркер после текста тезиса, вне HTML-тегов (не внутри <b> или <i>). Используй только ID из входных [msg:ID]. Не выдумывай ID.
 - Не пиши ссылки t.me, символ ↗ и URL самостоятельно — только маркеры [[msg:ID]].
@@ -226,7 +233,7 @@ def build_summary_prompt(messages_text: str, period_label: str) -> str:
 - Только переносы строк между блоками.
 
 Пример:
-<b>{SUMMARY_HEADER}</b>
+<b>{summary_header}</b>
 
 <b>{DEFAULT_GENERAL_TOPIC_TITLE}</b>
 • <b>Поиск людей</b>: Сложность из-за законов о данных. [[msg:123]]
@@ -411,12 +418,19 @@ def inject_message_links(text: str, message_links: dict[int, str]) -> str:
 def summarize_with_yandexgpt(
     messages_text: str,
     period_label: str,
+    period_days: int,
+    summary_header: str,
     message_links: dict[int, str],
 ) -> str:
     api_key = require_env("YANDEX_CLOUD_API_KEY")
     folder_id = require_env("YANDEX_CLOUD_FOLDER_ID")
     model = get_yandexgpt_model()
-    prompt = build_summary_prompt(messages_text, period_label)
+    prompt = build_summary_prompt(
+        messages_text,
+        period_label,
+        period_days,
+        summary_header,
+    )
     log_yandexgpt_request(model, prompt)
     payload = request_yandexgpt_completion(api_key, folder_id, model, prompt)
 
@@ -443,24 +457,25 @@ def summarize_with_yandexgpt(
     return summary
 
 
-def ensure_summary_header(summary: str) -> str:
+def ensure_summary_header(summary: str, summary_header: str) -> str:
+    summary_header_html = f"<b>{summary_header}</b>"
     summary = re.sub(
-        r"<b>\s*(?:Важные обсуждения за сутки|Уезды Беларуси, обсуждения за сутки)"
-        r"[^<]*</b>\s*\n*",
+        r"<b>\s*(?:Важные обсуждения за сутки|Уезды Беларуси, обсуждения за [^<]*)</b>\s*\n*",
         "",
         summary,
         count=1,
         flags=re.IGNORECASE,
     ).lstrip("\n")
-    if SUMMARY_HEADER not in summary:
-        summary = f"{SUMMARY_HEADER_HTML}\n\n{summary}"
+    if summary_header not in summary:
+        summary = f"{summary_header_html}\n\n{summary}"
     return summary
 
 
-def build_empty_summary() -> str:
+def build_empty_summary(period_days: int, summary_header: str) -> str:
+    period_description = format_summary_period_label(period_days)
     return (
-        f"{SUMMARY_HEADER_HTML}\n\n"
-        "За последние сутки в группе не было текстовых сообщений."
+        f"<b>{summary_header}</b>\n\n"
+        f"За последние {period_description} в группе не было текстовых сообщений."
     )
 
 
@@ -510,17 +525,19 @@ def send_to_channel(text: str) -> None:
 def build_summary(
     fetch_result: GroupFetchResult,
     period_label: str,
+    period_days: int,
+    summary_header: str,
     tz,
 ) -> str:
     messages = fetch_result.messages
     if not messages:
         print("No messages to summarize, using empty summary template.")
-        return build_empty_summary()
+        return build_empty_summary(period_days, summary_header)
 
     messages_text = build_messages_text(messages, fetch_result.topic_titles, tz)
     if not messages_text.strip():
         print("Messages text is empty after filtering, using empty summary template.")
-        return build_empty_summary()
+        return build_empty_summary(period_days, summary_header)
 
     print_section("Input for YandexGPT")
     print(f"Messages: {len(messages)}")
@@ -534,13 +551,21 @@ def build_summary(
     )
     model = get_yandexgpt_model()
     print(f"Generating summary with YandexGPT ({model})...")
-    summary = summarize_with_yandexgpt(messages_text, period_label, message_links)
-    return ensure_summary_header(summary)
+    summary = summarize_with_yandexgpt(
+        messages_text,
+        period_label,
+        period_days,
+        summary_header,
+        message_links,
+    )
+    return ensure_summary_header(summary, summary_header)
 
 
 async def run() -> None:
     group = require_env("TELEGRAM_GROUP")
     tz = get_timezone()
+    period_days = get_summary_period_days()
+    summary_header = get_summary_header(period_days)
     period_start, period_end = get_summary_period(tz)
 
     period_label = (
@@ -548,9 +573,10 @@ async def run() -> None:
         f"{period_end.astimezone(tz).strftime('%d.%m.%Y')}"
     )
 
-    print_section("Daily summary run")
+    print_section("Summary run")
     print(f"Group: {group}")
     print(f"Timezone: {tz}")
+    print(f"Period days: {period_days}")
     print(f"Period (local): {period_label}")
     print(
         f"Period (UTC): {period_start.isoformat()} — {period_end.isoformat()}"
@@ -574,7 +600,13 @@ async def run() -> None:
         count = sum(1 for message in fetch_result.messages if message.topic_id == topic_id)
         print(f"  - {title} (topic_id={topic_id}): {count} messages")
 
-    summary = build_summary(fetch_result, period_label, tz)
+    summary = build_summary(
+        fetch_result,
+        period_label,
+        period_days,
+        summary_header,
+        tz,
+    )
 
     print("\nSending summary to channel...")
     send_to_channel(summary)
