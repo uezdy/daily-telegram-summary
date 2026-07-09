@@ -16,7 +16,6 @@
 | `TELEGRAM_API_ID` | API ID с [my.telegram.org](https://my.telegram.org) |
 | `TELEGRAM_API_HASH` | API Hash с [my.telegram.org](https://my.telegram.org) |
 | `TELEGRAM_SESSION` | StringSession Telethon (см. ниже) |
-| `TELEGRAM_GROUP` | Группа-источник: `@username` или `-100...` |
 | `TELEGRAM_BOT_TOKEN` | Токен бота от [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHANNEL` | Канал назначения: `@channel` или `-100...` |
 | `YANDEX_CLOUD_API_KEY` | API-ключ сервисного аккаунта Yandex Cloud |
@@ -38,7 +37,7 @@ cp .env.example .env
 python scripts/create_session.py
 ```
 
-Скопируйте выведенную строку в `TELEGRAM_SESSION`. Аккаунт должен быть участником группы-источника.
+Скопируйте выведенную строку в `TELEGRAM_SESSION`. Аккаунт должен быть участником группы-источника `@uezdy` (задается константой в workflow).
 
 ### 2. Бот и канал
 
@@ -58,7 +57,7 @@ python scripts/create_session.py
 
 В репозитории: **Settings → Secrets and variables → Actions → New repository secret**
 
-Добавьте все переменные из таблицы выше.
+Добавьте все переменные из таблицы выше, кроме `TELEGRAM_GROUP` (источник задан в `.github/workflows/daily-summary.yml` как `@uezdy`).
 
 Опционально в **Variables** добавьте `TIMEZONE`.
 
