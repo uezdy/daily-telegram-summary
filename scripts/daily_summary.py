@@ -211,7 +211,7 @@ def build_summary_prompt(
 ) -> str:
     period_description = format_summary_period_label(period_days)
     return f"""Ты помощник для телеграм-сообщества. Проанализируй сообщения из группы за {period_description} ({period_label}).
-
+Не обсуждай темы, просто проанализируй.
 Входные данные сгруппированы по темам форума (topic). Каждое сообщение помечено как [msg:ID].
 
 Задача:
